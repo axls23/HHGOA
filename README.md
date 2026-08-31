@@ -12,6 +12,242 @@ this README covers what's actually built and how to run it.
 **No website.** The judge-facing surface is a CLI (`faceanchor run` /
 `verify` / `revoke` / `forge-score`) plus this repo.
 
+## Architecture (as built)
+
+Diagrams describe what is actually in this repo, with numbers measured on
+the build machine (i7-13700HX / RTX 4050). PRD §4 has the original design;
+this is the shipped version.
+
+### The whole idea
+
+```mermaid
+flowchart LR
+    A["📷 a photo"] --> B["🔎 find that face<br/>on public sites"]
+    B --> C["⛓️ stamp the finding<br/>on a blockchain"]
+    C --> D["✅ anyone re-checks it later<br/>with only this repo + the chain"]
+```
+
+The stamp is what makes a finding checkable by someone who has no reason
+to trust us. Everything else here exists to make that stamp mean
+something honest.
+
+### Step 1 — what happens to your photo
+
+```mermaid
+flowchart TD
+    P["your photo"] --> F["① find the face<br/>where is it? is there just one?<br/>~6 ms"]
+    F --> Q{"② is it good enough?<br/>big enough · sharp · facing us"}
+    Q -->|"no"| STOP["stop here, cheaply<br/>a bad photo costs milliseconds,<br/>not a whole web search"]
+    Q -->|"yes"| E["③ make a faceprint<br/>128 numbers describing this face<br/>~12 ms"]
+    E --> R["ready to search — ~17 ms total"]
+    E -.-> N["the faceprint lives in memory only<br/>never written to disk<br/>never sent to the chain"]
+
+    classDef stop fill:#fde,stroke:#c66
+    classDef note fill:#eef,stroke:#88a,stroke-dasharray:3 3
+    class STOP stop
+    class N note
+```
+
+The order matters: the cheap quality check runs **before** the expensive
+part, so a useless photo is rejected in milliseconds.
+
+### Step 2 — finding it online
+
+```mermaid
+flowchart TD
+    Q["faceprint + your search words"]
+    subgraph ArmA["asked all at once — a slow source is simply dropped"]
+        A1["Bluesky"]
+        A2["Mastodon"]
+        A3["Wikimedia Commons"]
+    end
+    Q --> ArmA
+    ArmA --> B["DuckDuckGo<br/>runs only to corroborate what was<br/>already found — it cannot search by face"]
+    ArmA --> F["download the images they point at<br/>64 at a time · 512 KB cap each"]
+    B --> F
+    F --> S["narrow them down"]
+```
+
+### Step 3 — narrowing 120 images down to one
+
+Cheapest test first, so the expensive one runs on as few images as possible.
+
+```mermaid
+flowchart TD
+    C["~120 candidate images"] --> P{"is this literally the same picture?<br/>64-bit perceptual hash · ~0.3 ms"}
+    P -->|"identical"| WIN["MATCH<br/>no face maths needed at all"]
+    P -->|"different"| F{"is there even a face in it?"}
+    F -->|"no"| X1["discard"]
+    F -->|"yes"| S{"same person?<br/>compare the two faceprints"}
+    S -->|"below 0.363"| X2["discard"]
+    S -->|"0.363 and up"| WIN
+    S -->|"0.50 and up"| E["MATCH — and stop searching entirely"]
+
+    classDef good fill:#dfd,stroke:#6a6
+    classDef bad fill:#eee,stroke:#999
+    class WIN,E good
+    class X1,X2 bad
+```
+
+### Step 4 — making the finding permanent
+
+```mermaid
+flowchart TD
+    M["the match"] --> J["① write down what we saw<br/>hashes and URLs only — never the photo,<br/>never the faceprint"]
+    J --> C["② put those bytes in a strict canonical order<br/>so a different machine, years later,<br/>rebuilds them byte-for-byte"]
+    C --> H["③ hash it → one 32-byte value"]
+    H --> CH["④ send only that value on-chain<br/>the chain stores no personal data"]
+    CH --> R["a permanent, timestamped receipt"]
+```
+
+### Step 5 — anyone re-checking it later
+
+```mermaid
+flowchart TD
+    B["evidence file"] --> C["same canonical bytes"] --> H["same hash"] --> A{"ask the chain:<br/>have you seen this before?"}
+    A -->|"yes — at 14:32"| OK["untouched ✅"]
+    A -->|"never seen it"| BAD["something was edited,<br/>even by a single byte ❌"]
+
+    classDef good fill:#dfd,stroke:#6a6
+    classDef bad fill:#fde,stroke:#c66
+    class OK good
+    class BAD bad
+```
+
+That second branch **is** the tamper demo: change one character in the
+evidence file and its hash no longer matches anything on the chain.
+
+---
+
+## Reference — the precise view
+
+### Module map
+
+```mermaid
+flowchart TD
+    CLI["cli.py<br/>the one place the stages are wired together"]
+    CLI --> CO["consent.py<br/>the run aborts without a consent artifact"]
+    CLI --> V["vision/<br/>decode · detect · quality · align · embed · phash"]
+    CLI --> S["search/<br/>bluesky · mastodon · commons · duckduckgo<br/>fanout · score"]
+    CLI --> E["evidence/<br/>bundle · jcs · cid · quantize · platform_check"]
+    CLI --> CH["chain/<br/>base · anvil · evm · solana"]
+    CLI -.->|"--zk only"| Z["zk/<br/>witness · prove"]
+    S -->|"re-uses the same detector<br/>and embedder on candidates"| V
+    Z -->|"quantises the faceprints"| E
+
+    classDef opt stroke-dasharray:4 3
+    class Z opt
+```
+
+Files worth knowing about:
+
+| File | Why it exists |
+|---|---|
+| `vision/embed.py` | Two paths: CPU for the single probe, CUDA batch-32 for candidates. Preprocessing is pinned to match OpenCV's own C++ output exactly (RGB, raw 0–255) |
+| `vision/models.py` | Derives a batch-dynamic ONNX export — the upstream weights hardcode batch=1, which would make the GPU path pointless |
+| `vision/_cuda_libs.py` | dlopens cuDNN/cuBLAS from site-packages so no `LD_LIBRARY_PATH` export is needed |
+| `search/fanout.py` | HTTP/2 pool, per-source timeouts, 512 KB range-capped fetches |
+| `evidence/jcs.py` | RFC 8785 canonicalisation — hashing `json.dumps` output would not be reproducible |
+| `evidence/platform_check.py` | Detects the platform editing or deleting a post after we recorded it |
+
+### Chain adapters
+
+```mermaid
+flowchart TD
+    I["ChainAdapter<br/>chain/base.py"]
+    I --> A["AnvilAdapter<br/>local · instant · free"]
+    I --> E["EvmAdapter<br/>Polygon Amoy or any EVM"]
+    I --> S["SolanaAdapter<br/>devnet · SPL Memo · no custom program"]
+    A -.->|"subclasses"| E
+```
+
+| Operation | anvil | amoy | solana |
+|---|:---:|:---:|:---:|
+| `anchor` | ✓ | ✓ | ✓ |
+| `verify` | ✓ | ✓ | ✓ * |
+| `wait_for_inclusion` | ✓ | ✓ | ✓ |
+| `revoke` / `consentStatus` | ✓ | ✓ | ✗ |
+| `anchorWithProof` | ✓ | ✓ | ✗ |
+
+\* Wallet-scoped scan of recent signatures, not an O(1) state lookup — SPL
+Memo stores no on-chain state by design. The EVM path deliberately keeps
+an `anchoredAt` mapping so `verify()` is a single `eth_call` with no
+indexer dependency (PRD §6.2).
+
+### The ZK match proof (`--zk`)
+
+Anchoring a score alone is just an assertion — nothing stops an operator
+writing down a number they never computed. This makes the score
+non-repudiable *without* publishing either faceprint.
+
+```mermaid
+flowchart TD
+    E1["probe faceprint"] --> Q["quantise to whole numbers<br/>and commit to each publicly"]
+    E2["candidate faceprint"] --> Q
+    Q --> CIR["the circuit checks three things:<br/>• each faceprint matches its public commitment<br/>• every number is within range<br/>• their similarity clears the threshold"]
+    CIR --> PR["a 192-byte Groth16 proof<br/>~41k constraints · ~2.7 s"]
+    PR --> OFF["verified off-chain<br/>snarkjs"]
+    PR --> ON["verified on-chain<br/>a forged score is rejected outright"]
+
+    classDef good fill:#dfd,stroke:#6a6
+    class ON good
+```
+
+| The proof **does** establish | The proof does **not** establish |
+|---|---|
+| The prover knows two committed, in-range faceprints | That those faceprints are what the face model actually produced from these two images |
+| Their similarity genuinely clears the threshold | That the match is *correct*, or the post authentic |
+| The score is non-repudiable, and neither faceprint is ever published | Proving the derivation needs zkML over the whole network (~10⁸ constraints) — out of scope, and the step stays trusted |
+
+### What `verify` can tell you
+
+```mermaid
+flowchart LR
+    V["faceanchor verify<br/>--check-platform"] --> D{"does the hash<br/>match the chain?"}
+    D -->|"no"| E1["OUR evidence was altered"]
+    D -->|"yes"| P{"does the post still<br/>hash the same?"}
+    P -->|"identical"| E2["record intact ✅"]
+    P -->|"changed"| E3["the PLATFORM edited it<br/>after we recorded it"]
+    P -->|"gone"| E4["deleted after observation —<br/>and we can prove it existed"]
+
+    classDef good fill:#dfd,stroke:#6a6
+    classDef warn fill:#ffd,stroke:#ca6
+    classDef bad fill:#fde,stroke:#c66
+    class E2 good
+    class E3,E4 warn
+    class E1 bad
+```
+
+Every `verify` also checks whether the subject has withdrawn consent, and
+prints a loud `⚠ CONSENT REVOKED` if so. The post-side check only applies
+to Bluesky matches (AT Protocol records carry their own content hash);
+Mastodon and Commons report `not_applicable` rather than a false signal.
+
+### Build log
+
+`✓` = exercised live against a real network or chain during the build.
+`~` = built and unit-tested, but blocked from live verification by an
+external resource (see the status table below).
+
+| # | Shipped | Verified |
+|---|---|---|
+| M0 | Scaffold — uv venv (3.12), Foundry, model fetch | ✓ |
+| M1 | Vision — YuNet + SFace + quality gate | ✓ p50 17 ms |
+| M2 | Discovery — Arm A adapters, fanout, scoring cascade | ✓ live self-match |
+| M3 | `EvidenceAnchor.sol` + Anvil adapter | ✓ `forge test` |
+| M4 | Evidence bundle, JCS/CID, CLI `run`/`verify` | ✓ live tamper demo |
+| — | Amoy public testnet path | ~ needs a funded key |
+| M5 | Arm B (DuckDuckGo) + consent gate | ✓ 40 merged candidates |
+| M6 | Solana SPL Memo adapter | ~ devnet faucet rate-limited |
+| M7 | README, architecture, threat model, consent docs | ✓ |
+| M8 | Platform-mutation detection + `revoke()` | ✓ live, all four verdicts |
+| M9 | ZK L1 — Circom circuit, trusted setup, prove/verify | ✓ live, both polarities |
+| M10 | ZK L2 — `Groth16Verifier.sol` + `anchorWithProof` | ✓ live `BadProof` revert |
+
+66 tests: 18 Solidity, 48 Python. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+for the prose walkthrough and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) for
+what is and isn't trustless.
+
 ## Subject policy (read before running)
 
 This pipeline is a deanonymization primitive. It will not run without an
