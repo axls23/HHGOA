@@ -17,7 +17,7 @@ from faceanchor.evidence.jcs import canonicalize
 from faceanchor.evidence.platform_check import check_platform_mutation
 from faceanchor.search import fanout, score
 from faceanchor.search.models import ScoredMatch
-from faceanchor.vision import detect, phash, quality
+from faceanchor.vision import align, detect, embed, phash, quality
 from faceanchor.vision.decode import decode_jpeg_bytes
 
 app = typer.Typer(help="face-anchor: probe -> discovery -> on-chain verification")
@@ -52,6 +52,7 @@ def run(
     chain: str = typer.Option("anvil", "--chain", help="anvil | amoy"),
     contract_address: str | None = typer.Option(None, "--contract-address"),
     face_index: int | None = typer.Option(None, "--face-index", help="Disambiguate when multiple faces are detected"),
+    zk: bool = typer.Option(False, "--zk", help="Attach a Groth16 match proof (PRD §7.1 L1) — bundle keeps Poseidon commitments only, never the raw embeddings"),
 ):
     """Stage 1 (vision) -> Stage 2 (discovery) -> Stage 3 (anchor)."""
     try:
@@ -104,6 +105,26 @@ def run(
             match_text_sha256=hashlib.sha256((best.candidate.text or "").encode()).hexdigest(),
             match_image_url_sha256=hashlib.sha256(best.candidate.image_url.encode()).hexdigest(),
         )
+        if zk:
+            from faceanchor.search.score import COSINE_ACCEPT_THRESHOLD
+            from faceanchor.zk.prove import generate_proof, verify_proof
+            from faceanchor.zk.witness import build_circuit_input
+
+            raw_bytes = next(b for c, b in fetched if c.image_url == best.candidate.image_url)
+            cand_image = decode_jpeg_bytes(raw_bytes)
+            cand_faces = detect.detect_faces(cand_image)
+            cand_face = max(cand_faces, key=lambda f: f.score)
+            cand_crop = align.align_and_crop(cand_image, cand_face)
+            cand_embedding = embed.embed_one(cand_crop)
+
+            circuit_input = build_circuit_input(probe_ctx.embedding, cand_embedding, COSINE_ACCEPT_THRESHOLD)
+            proof = generate_proof(circuit_input)
+            if not verify_proof(proof):
+                typer.echo("ERROR: generated ZK proof failed self-verification", err=True)
+                raise typer.Exit(1)
+            bundle["zk"] = {"proof": proof.proof, "public_signals": proof.public_signals}
+            typer.echo("Stage 3: ZK match proof attached (192-byte Groth16 proof; no raw embedding in bundle)")
+
         canonical = canonicalize(bundle)
         digest = bundle_digest(bundle)
         cid = compute_cid(canonical)
