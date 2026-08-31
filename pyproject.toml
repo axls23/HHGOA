@@ -6,6 +6,12 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "onnxruntime-gpu>=1.20",
     "onnxconverter-common>=1.14",
+    "onnx>=1.17",
+    # onnxruntime-gpu doesn't pull these in itself; CUDA EP dlopen-fails
+    # without them (see faceanchor.vision._cuda_libs, which preloads them).
+    "nvidia-cudnn-cu12>=9.0",
+    "nvidia-cublas-cu12>=12.0",
+    "nvidia-cuda-nvrtc-cu12>=12.0",
     "opencv-python>=4.10",
     "opencv-contrib-python>=4.10",
     "PyTurboJPEG>=1.7",
@@ -23,6 +29,9 @@ dependencies = [
     "solders>=0.21",
     "pydantic>=2.9",
     "numpy>=1.26,<2.0",
+    "rfc8785>=0.1.4",
+    "multiformats>=0.3.1",
+    "python-ulid>=3.0",
 ]
 
 [project.optional-dependencies]

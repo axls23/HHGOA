@@ -1,0 +1,7 @@
+{
+  "lane": "B",
+  "subject": "teammate",
+  "statement": "I consent to my face being used as the probe image for this face-anchor pipeline run, including the discovery search and on-chain anchoring described in PRD_face_anchor.md. I understand this artifact's digest (not the artifact itself) is anchored on-chain, and that I can revoke this consent at any time via `faceanchor revoke`.",
+  "signed_by": "REPLACE_WITH_TEAMMATE_NAME_OR_EMAIL",
+  "signed_at": "REPLACE_WITH_ISO8601_TIMESTAMP"
+}
