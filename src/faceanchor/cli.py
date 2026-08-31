@@ -14,6 +14,7 @@ from faceanchor.consent import MissingConsentError, load_consent_digest
 from faceanchor.evidence.bundle import ProbeInfo, build_bundle, bundle_digest
 from faceanchor.evidence.cid import compute_cid
 from faceanchor.evidence.jcs import canonicalize
+from faceanchor.evidence.platform_check import check_platform_mutation
 from faceanchor.search import fanout, score
 from faceanchor.search.models import ScoredMatch
 from faceanchor.vision import detect, phash, quality
@@ -128,20 +129,60 @@ def verify(
     bundle: Path = typer.Option(..., "--bundle", exists=True),
     chain: str = typer.Option("anvil", "--chain"),
     contract_address: str | None = typer.Option(None, "--contract-address"),
+    check_platform: bool = typer.Option(False, "--check-platform", help="Re-fetch the matched post and detect platform-side mutation (PRD §7.2)"),
 ):
     """Re-derive the digest from the bundle and check it against on-chain state."""
     data = json.loads(bundle.read_text())
     digest = bundle_digest(data)
+    consent_digest_hex = data.get("probe", {}).get("consent_digest")
 
-    adapter = _resolve_chain(chain, contract_address)
-    result = asyncio.run(adapter.verify(digest))
+    async def _verify():
+        adapter = _resolve_chain(chain, contract_address)
+        result = await adapter.verify(digest)
 
-    typer.echo(f"digest={digest.hex()}")
-    if result.ok:
-        typer.echo(f"OK — anchored at timestamp {result.timestamp}")
-    else:
-        typer.echo("FAIL — digest not found on-chain (bundle was altered, or never anchored)")
+        typer.echo(f"digest={digest.hex()}")
+        if result.ok:
+            typer.echo(f"OK — anchored at timestamp {result.timestamp}")
+        else:
+            typer.echo("FAIL — digest not found on-chain (bundle was altered, or never anchored)")
+
+        if consent_digest_hex:
+            try:
+                consent_result = await adapter.consent_status(bytes.fromhex(consent_digest_hex))
+                if consent_result.ok:
+                    typer.echo(f"⚠ CONSENT REVOKED @ timestamp {consent_result.timestamp}")
+            except NotImplementedError:
+                pass  # chain doesn't support revocation (e.g. Solana) — nothing to report
+
+        if check_platform:
+            async with fanout.make_client() as client:
+                mutation_result = await check_platform_mutation(client, data, digest_verified=result.ok)
+            typer.echo(f"platform check: {mutation_result.verdict.value} — {mutation_result.detail}")
+
+        return result.ok
+
+    ok = asyncio.run(_verify())
+    if not ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def revoke(
+    consent: Path = typer.Option(..., "--consent", exists=True),
+    chain: str = typer.Option("anvil", "--chain"),
+    contract_address: str | None = typer.Option(None, "--contract-address"),
+):
+    """Revoke a previously-anchored consent artifact (PRD §3/§7.3). Irreversible."""
+    consent_digest_hex = load_consent_digest(consent)
+    adapter = _resolve_chain(chain, contract_address)
+
+    async def _revoke():
+        receipt = await adapter.revoke(bytes.fromhex(consent_digest_hex))
+        typer.echo(f"revoke tx submitted: {receipt.tx_hash}")
+        await adapter.wait_for_inclusion(receipt)
+        typer.echo(f"consent_digest={consent_digest_hex} REVOKED")
+
+    asyncio.run(_revoke())
 
 
 if __name__ == "__main__":

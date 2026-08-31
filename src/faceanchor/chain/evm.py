@@ -4,7 +4,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from web3 import AsyncWeb3
+from web3 import AsyncWeb3, Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from faceanchor.chain.base import AnchorReceipt, ChainAdapter, VerifyResult
@@ -34,7 +34,9 @@ class EvmAdapter(ChainAdapter):
         if poa:
             self._w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         self._account = self._w3.eth.account.from_key(private_key)
-        self._contract = self._w3.eth.contract(address=contract_address, abi=_abi())
+        # Deploy scripts/broadcast logs commonly emit lowercase addresses;
+        # web3.py requires EIP-55 checksummed input.
+        self._contract = self._w3.eth.contract(address=Web3.to_checksum_address(contract_address), abi=_abi())
         self._cached_nonce: int | None = None
 
     async def _next_nonce(self) -> int:
@@ -44,9 +46,9 @@ class EvmAdapter(ChainAdapter):
             self._cached_nonce += 1
         return self._cached_nonce
 
-    async def anchor(self, digest: bytes, cid: str) -> AnchorReceipt:
+    async def _send(self, contract_fn) -> AnchorReceipt:
         nonce = await self._next_nonce()
-        tx = await self._contract.functions.anchor(digest, cid).build_transaction(
+        tx = await contract_fn.build_transaction(
             {
                 "from": self._account.address,
                 "nonce": nonce,
@@ -57,9 +59,19 @@ class EvmAdapter(ChainAdapter):
         tx_hash = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
         return AnchorReceipt(tx_hash=tx_hash.hex())
 
+    async def anchor(self, digest: bytes, cid: str) -> AnchorReceipt:
+        return await self._send(self._contract.functions.anchor(digest, cid))
+
     async def verify(self, digest: bytes) -> VerifyResult:
         ok, ts = await self._contract.functions.verify(digest).call()
         return VerifyResult(ok=ok, timestamp=ts)
 
     async def wait_for_inclusion(self, receipt: AnchorReceipt) -> None:
         await self._w3.eth.wait_for_transaction_receipt(receipt.tx_hash)
+
+    async def revoke(self, consent_digest: bytes) -> AnchorReceipt:
+        return await self._send(self._contract.functions.revoke(consent_digest))
+
+    async def consent_status(self, consent_digest: bytes) -> VerifyResult:
+        revoked, ts = await self._contract.functions.consentStatus(consent_digest).call()
+        return VerifyResult(ok=revoked, timestamp=ts)

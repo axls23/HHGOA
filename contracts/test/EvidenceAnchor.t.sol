@@ -72,4 +72,47 @@ contract EvidenceAnchorTest is Test {
         // PRD target ~46k (cold SSTORE 20k + log ~2k + base 21k); allow headroom for calldata cost.
         assertLt(used, 70_000);
     }
+
+    function test_RevokeAndConsentStatus() public {
+        bytes32 consentDigest = keccak256("consent-1");
+
+        (bool revokedBefore, uint64 tsBefore) = anchor.consentStatus(consentDigest);
+        assertFalse(revokedBefore);
+        assertEq(tsBefore, 0);
+
+        anchor.revoke(consentDigest);
+
+        (bool revokedAfter, uint64 tsAfter) = anchor.consentStatus(consentDigest);
+        assertTrue(revokedAfter);
+        assertEq(tsAfter, uint64(block.timestamp));
+    }
+
+    function test_RevertOnDoubleRevoke() public {
+        bytes32 consentDigest = keccak256("consent-2");
+        anchor.revoke(consentDigest);
+
+        vm.expectRevert(abi.encodeWithSelector(EvidenceAnchor.AlreadyRevoked.selector, consentDigest));
+        anchor.revoke(consentDigest);
+    }
+
+    function test_EmitsRevokedEvent() public {
+        bytes32 consentDigest = keccak256("consent-3");
+        vm.expectEmit(true, true, false, true);
+        emit EvidenceAnchor.Revoked(consentDigest, address(this), uint64(block.timestamp));
+        anchor.revoke(consentDigest);
+    }
+
+    function test_RevokeIsIndependentFromAnchoredAt() public {
+        // anchoring a digest and revoking a (different-namespace) consent
+        // digest that happens to share the same bytes32 value must not
+        // cross-contaminate — they're separate mappings.
+        bytes32 sharedValue = keccak256("shared");
+        anchor.anchor(sharedValue, "cid-shared");
+        anchor.revoke(sharedValue);
+
+        (bool anchoredOk,) = anchor.verify(sharedValue);
+        (bool revoked,) = anchor.consentStatus(sharedValue);
+        assertTrue(anchoredOk);
+        assertTrue(revoked);
+    }
 }

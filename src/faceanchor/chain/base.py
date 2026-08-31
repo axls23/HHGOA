@@ -34,3 +34,12 @@ class ChainAdapter(ABC):
     @abstractmethod
     async def wait_for_inclusion(self, receipt: AnchorReceipt) -> None:
         """Block until `receipt`'s tx is included. Called after streaming tx_hash to the client (PRD §4)."""
+
+    async def revoke(self, consent_digest: bytes) -> AnchorReceipt:
+        """PRD §7.3 — EVM-only (EvidenceAnchor.revoke). SPL Memo has no on-chain
+        state at all, so revocation semantics don't have a Solana equivalent."""
+        raise NotImplementedError(f"{type(self).__name__} does not support consent revocation")
+
+    async def consent_status(self, consent_digest: bytes) -> VerifyResult:
+        """PRD §7.3 — EVM-only. `VerifyResult.ok` means "revoked", not "anchored"."""
+        raise NotImplementedError(f"{type(self).__name__} does not support consent revocation")

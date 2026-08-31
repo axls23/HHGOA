@@ -11,10 +11,18 @@ contract EvidenceAnchor {
         string  cid          // IPFS CIDv1 of the full bundle
     );
     event BatchAnchored(bytes32 indexed merkleRoot, address indexed attester, uint64 timestamp, uint32 leaves);
+    event Revoked(bytes32 indexed consentDigest, address indexed revoker, uint64 timestamp);
 
     error AlreadyAnchored(bytes32 digest);
+    error AlreadyRevoked(bytes32 consentDigest);
 
     mapping(bytes32 => uint64) public anchoredAt;
+
+    /// @notice Bidirectional to `anchoredAt`: the anchor is permanent, but the
+    /// subject holds a permanent, publicly auditable, timestamped veto over
+    /// its use (PRD §7.3) — closer to what DPDP §12 / GDPR Art. 17 actually
+    /// ask for than silent deletion, since a hash can't be un-anchored anyway.
+    mapping(bytes32 => uint64) public revokedAt;
 
     function anchor(bytes32 digest, string calldata cid) external {
         if (anchoredAt[digest] != 0) revert AlreadyAnchored(digest);
@@ -32,5 +40,21 @@ contract EvidenceAnchor {
     function verify(bytes32 digest) external view returns (bool ok, uint64 ts) {
         ts = anchoredAt[digest];
         ok = ts != 0;
+    }
+
+    /// @notice Revokes a previously-anchored consent artifact digest (PRD §3/§7.3).
+    /// Anyone can call `revoke` — the digest alone carries no ability to
+    /// distinguish subject from attacker on-chain, exactly like `anchor` itself;
+    /// the trust model here is the same as the base anchor (off-chain
+    /// attribution via whoever controls the signing key), not a new one.
+    function revoke(bytes32 consentDigest) external {
+        if (revokedAt[consentDigest] != 0) revert AlreadyRevoked(consentDigest);
+        revokedAt[consentDigest] = uint64(block.timestamp);
+        emit Revoked(consentDigest, msg.sender, uint64(block.timestamp));
+    }
+
+    function consentStatus(bytes32 consentDigest) external view returns (bool revoked, uint64 ts) {
+        ts = revokedAt[consentDigest];
+        revoked = ts != 0;
     }
 }
