@@ -47,6 +47,7 @@ def run(
     probe: Path = typer.Option(..., "--probe", exists=True, help="Path to the probe image"),
     subject_consent: Path | None = typer.Option(None, "--subject-consent", help="Required consent artifact (PRD §3)"),
     query: str = typer.Option(..., "--query", help="Discovery search query (author handle, name, or keywords)"),
+    seed_query: str | None = typer.Option(None, "--seed-query", help="Explicit Arm B (DuckDuckGo) seed; otherwise derived from Arm A's best hit"),
     chain: str = typer.Option("anvil", "--chain", help="anvil | amoy"),
     contract_address: str | None = typer.Option(None, "--contract-address"),
     face_index: int | None = typer.Option(None, "--face-index", help="Disambiguate when multiple faces are detected"),
@@ -76,8 +77,8 @@ def run(
 
     async def _discover_and_anchor():
         async with fanout.make_client() as client:
-            candidates = await fanout.arm_a_fanout(client, query)
-            typer.echo(f"Stage 2: {len(candidates)} candidates from Arm A ({query!r})")
+            candidates = await fanout.full_fanout(client, query, seed_query=seed_query)
+            typer.echo(f"Stage 2: {len(candidates)} candidates ({query!r}, seed_query={seed_query!r})")
             fetched = await fanout.fetch_all_candidates(client, candidates)
             matches = score.score_candidates(probe_ctx, fetched)
 

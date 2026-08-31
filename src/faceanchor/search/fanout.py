@@ -12,7 +12,7 @@ import hashlib
 
 import httpx
 
-from faceanchor.search import bluesky, commons, mastodon
+from faceanchor.search import bluesky, commons, duckduckgo, mastodon
 from faceanchor.search.models import Candidate
 
 MAX_CONNECTIONS = 64
@@ -48,6 +48,36 @@ async def arm_a_fanout(client: httpx.AsyncClient, query: str) -> list[Candidate]
         _bounded(commons.search_images(client, query)),
     )
     return [c for group in results for c in group]
+
+
+async def full_fanout(client: httpx.AsyncClient, query: str, seed_query: str | None = None) -> list[Candidate]:
+    """Arm A + Arm B (PRD §5.2 cascade diagram).
+
+    With an explicit `seed_query`, Arm B fires concurrently with Arm A (both
+    are independent of Arm A's results in that case). Without one, Arm B is
+    seeded from Arm A's first hit's author/text — it corroborates a match
+    Arm A already found rather than bootstrapping from the face alone (the
+    deliberate capability reduction documented in duckduckgo.py).
+
+    Either way Arm B is bounded by its own 1.5s deadline/rate limiter and a
+    throttled or empty Arm B never affects the Arm A result — it only adds.
+    """
+    if seed_query:
+        arm_a_task = asyncio.ensure_future(arm_a_fanout(client, query))
+        arm_b_task = asyncio.ensure_future(duckduckgo.search_images(seed_query))
+        arm_a_results, arm_b_results = await asyncio.gather(arm_a_task, arm_b_task)
+        return arm_a_results + arm_b_results
+
+    arm_a_results = await arm_a_fanout(client, query)
+    if not arm_a_results:
+        return arm_a_results
+
+    seed = duckduckgo.extract_seed_terms(arm_a_results[0].author, arm_a_results[0].text)
+    if not seed:
+        return arm_a_results
+
+    arm_b_results = await duckduckgo.search_images(seed)
+    return arm_a_results + arm_b_results
 
 
 async def fetch_candidate_bytes(client: httpx.AsyncClient, candidate: Candidate) -> tuple[Candidate, bytes | None]:
