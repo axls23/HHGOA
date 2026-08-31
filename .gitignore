@@ -1,0 +1,36 @@
+__pycache__/
+*.pyc
+.venv/
+.python-version
+*.egg-info/
+
+# models — never committed, fetched via models/fetch.sh
+models/*.onnx
+!models/fetch.sh
+
+# evidence bundles — gitignored except one committed sample
+evidence/*
+!evidence/.gitkeep
+!evidence/sample_bundle.json
+
+# foundry / solidity
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/31337/
+contracts/broadcast/*/80002/
+
+# zk build artifacts (r1cs, wasm, zkey) — large, regenerable via zk/setup.sh
+zk/build/*
+!zk/build/.gitkeep
+
+# node (circom/snarkjs tooling)
+node_modules/
+
+# local secrets
+.env
+*.key
+consent/*.json
+!consent/*.example.json
+
+# OS / editor
+.DS_Store
