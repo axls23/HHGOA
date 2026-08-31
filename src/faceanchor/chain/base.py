@@ -43,3 +43,7 @@ class ChainAdapter(ABC):
     async def consent_status(self, consent_digest: bytes) -> VerifyResult:
         """PRD §7.3 — EVM-only. `VerifyResult.ok` means "revoked", not "anchored"."""
         raise NotImplementedError(f"{type(self).__name__} does not support consent revocation")
+
+    async def anchor_with_proof(self, digest: bytes, cid: str, proof: dict, public_signals: list[str]) -> AnchorReceipt:
+        """PRD §7.1 L2 — EVM-only (EvidenceAnchor.anchorWithProof)."""
+        raise NotImplementedError(f"{type(self).__name__} does not support anchorWithProof")

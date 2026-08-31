@@ -206,5 +206,47 @@ def revoke(
     asyncio.run(_revoke())
 
 
+@app.command(name="forge-score")
+def forge_score(
+    bundle: Path = typer.Option(..., "--bundle", exists=True),
+    score: float = typer.Option(..., "--score", help="A claimed score to forge into the bundle's public signals"),
+    chain: str = typer.Option("anvil", "--chain"),
+    contract_address: str | None = typer.Option(None, "--contract-address"),
+):
+    """Demo command (PRD §12): attempts to anchor a bundle whose score was
+    edited to `--score` while reusing an existing (now-mismatched) ZK proof.
+    Expected outcome is an on-chain revert — this proves the chain enforces
+    the proof rather than trusting the claimed score."""
+    data = json.loads(bundle.read_text())
+    zk_data = data.get("zk")
+    if not zk_data:
+        typer.echo("ERROR: bundle has no zk proof — run `faceanchor run --zk` first", err=True)
+        raise typer.Exit(1)
+
+    from faceanchor.zk.witness import COSINE_TO_DOT_SCALE
+
+    forged = json.loads(json.dumps(data))  # deep copy
+    forged["score"]["value"] = score
+    forged_public_signals = list(zk_data["public_signals"])
+    forged_public_signals[2] = str(int(round(score * COSINE_TO_DOT_SCALE)))
+
+    digest = bundle_digest(forged)
+    cid = compute_cid(canonicalize(forged))
+    adapter = _resolve_chain(chain, contract_address)
+
+    async def _forge():
+        try:
+            receipt = await adapter.anchor_with_proof(digest, cid, zk_data["proof"], forged_public_signals)
+            await adapter.wait_for_inclusion(receipt)
+            typer.echo(f"UNEXPECTED: chain accepted the forged score (tx {receipt.tx_hash})")
+            raise typer.Exit(1)
+        except typer.Exit:
+            raise
+        except Exception as e:
+            typer.echo(f"chain REJECTS: {e}")
+
+    asyncio.run(_forge())
+
+
 if __name__ == "__main__":
     app()

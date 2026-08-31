@@ -8,7 +8,7 @@ contract EvidenceAnchorTest is Test {
     EvidenceAnchor anchor;
 
     function setUp() public {
-        anchor = new EvidenceAnchor();
+        anchor = new EvidenceAnchor(address(0)); // ZK path disabled; not exercised by these tests
     }
 
     function test_AnchorAndVerify() public {

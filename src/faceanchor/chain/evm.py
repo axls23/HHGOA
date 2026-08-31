@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -75,3 +77,32 @@ class EvmAdapter(ChainAdapter):
     async def consent_status(self, consent_digest: bytes) -> VerifyResult:
         revoked, ts = await self._contract.functions.consentStatus(consent_digest).call()
         return VerifyResult(ok=revoked, timestamp=ts)
+
+    async def anchor_with_proof(self, digest: bytes, cid: str, proof: dict, public_signals: list[str]) -> AnchorReceipt:
+        # snarkjs's proof.json is (pi_a, pi_b, pi_c, affine-with-a-trailing-"1")
+        # in a curve-library-internal layout, and pi_b's inner coordinate order
+        # is swapped relative to what Solidity's pairing precompile expects.
+        # `snarkjs generatecall` is the one tool that gets that swap right —
+        # shell out to it rather than re-deriving the reordering by hand.
+        from faceanchor.zk.prove import _snarkjs_bin
+
+        with tempfile.TemporaryDirectory(prefix="faceanchor_zk_calldata_") as tmp:
+            proof_path = Path(tmp) / "proof.json"
+            public_path = Path(tmp) / "public.json"
+            proof_path.write_text(json.dumps(proof))
+            public_path.write_text(json.dumps(public_signals))
+
+            result = subprocess.run(
+                [_snarkjs_bin(), "generatecall", public_path.name, proof_path.name],
+                cwd=tmp,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        a, b, c, pub_signals = json.loads(f"[{result.stdout.strip()}]")
+        a = [int(x, 16) for x in a]
+        b = [[int(x, 16) for x in row] for row in b]
+        c = [int(x, 16) for x in c]
+        pub_signals = [int(x, 16) for x in pub_signals]
+
+        return await self._send(self._contract.functions.anchorWithProof(digest, cid, a, b, c, pub_signals))
