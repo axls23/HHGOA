@@ -174,6 +174,79 @@ Memo stores no on-chain state by design. The EVM path deliberately keeps
 an `anchoredAt` mapping so `verify()` is a single `eth_call` with no
 indexer dependency (PRD §6.2).
 
+### The contract itself (`EvidenceAnchor.sol`)
+
+Ninety-seven lines, two mappings, no owner. Anyone may call anything —
+there is no admin, no pause switch and no upgrade path — so the only
+decision the deployer makes is which verifier address gets frozen in at
+construction.
+
+```mermaid
+flowchart TD
+    A1["anchor<br/>(digest, cid)"]
+    A2["anchorBatch<br/>(merkleRoot, leaves)"]
+    A3["anchorWithProof<br/>(digest, cid, proof, pubSignals)"]
+    A4["revoke<br/>(consentDigest)"]
+
+    GV{"Groth16Verifier.verifyProof<br/>immutable — frozen in at deploy<br/>address(0) switches this path off"}
+    G1{"has this digest<br/>been written before?"}
+    G2{"has this consent digest<br/>been written before?"}
+
+    ST1[("anchoredAt<br/>bytes32 → uint64<br/>digest ↦ block timestamp")]
+    ST2[("revokedAt<br/>bytes32 → uint64<br/>consent digest ↦ block timestamp")]
+
+    A3 --> GV
+    GV -->|"proof fails"| BP["revert BadProof"]
+    GV -->|"proof verifies"| G1
+    A1 --> G1
+    A2 --> G1
+    A4 --> G2
+
+    G1 -->|"yes"| E1["revert AlreadyAnchored"]
+    G1 -->|"no"| ST1
+    G2 -->|"yes"| E2["revert AlreadyRevoked"]
+    G2 -->|"no"| ST2
+
+    ST1 --> EV1["emit Anchored / BatchAnchored<br/>indexed digest · indexed attester · cid"]
+    ST2 --> EV2["emit Revoked<br/>indexed consentDigest · indexed revoker"]
+
+    ST1 --> RD1["verify(digest)<br/>→ (ok, timestamp)"]
+    ST2 --> RD2["consentStatus(consentDigest)<br/>→ (revoked, timestamp)"]
+
+    classDef store fill:#eef,stroke:#88a
+    classDef bad fill:#fde,stroke:#c66
+    classDef read fill:#dfd,stroke:#6a6
+    class ST1,ST2 store
+    class E1,E2,BP bad
+    class RD1,RD2 read
+```
+
+| Function | Writes | Emits | Measured gas |
+|---|---|---|---|
+| `anchor` | `anchoredAt[digest]` | `Anchored` | 47.2k median |
+| `anchorBatch` | `anchoredAt[merkleRoot]` | `BatchAnchored` | 46.6k, whatever the leaf count |
+| `anchorWithProof` | `anchoredAt[digest]`, only once the verifier returns true | `Anchored` | 247.4k median — 202.2k of it the bn254 pairing |
+| `revoke` | `revokedAt[consentDigest]` | `Revoked` | 46.1k |
+| `verify` · `consentStatus` | nothing — both `view` | — | ~2.5k, a single `eth_call` |
+
+Four things the diagram is worth reading closely for:
+
+- **Every key is write-once.** A second write to the same key reverts
+  rather than overwriting, so a timestamp can never be moved once set.
+  That is the whole tamper-evidence property, and it is four lines of
+  Solidity.
+- **Storage holds a timestamp and nothing else.** Who anchored a record
+  lives in the event log (`msg.sender`, indexed), not in state — so
+  `verify()` tells you *that* a digest was anchored and *when*, not by
+  whom. `faceanchor footprint` reads the logs for that.
+- **The two mappings never touch.** A value anchored as evidence and the
+  same value revoked as consent are independent rows; there is a test
+  pinning exactly that.
+- **`anchorBatch` stores a root and stops there.** The contract has no
+  leaf-verification function, so proving one record against a batched
+  root is not something this deployment can do today — the root is an
+  anchor, not yet a queryable index.
+
 ### The ZK match proof (`--zk`)
 
 Anchoring a score alone is just an assertion — nothing stops an operator
