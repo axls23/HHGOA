@@ -269,7 +269,9 @@ Act Art. 5(1)(e)).
 Requires: Python 3.12 (not 3.13+ — some pinned wheels lag), [`uv`](https://docs.astral.sh/uv/),
 [Foundry](https://getfoundry.sh), and an NVIDIA GPU + CUDA driver if you want
 the CUDA execution provider (CPU-only works fine — see PRD §5.4, GPU only
-matters for batch-embedding a wide candidate fanout).
+matters for batch-embedding a wide candidate fanout). A V4L2 webcam
+(`/dev/video*`) if you want the demo to capture its own probe; otherwise pass
+`--probe PHOTO`.
 
 ```bash
 make setup      # venv (uv), Python deps, ONNX model weights, forge build
@@ -295,6 +297,142 @@ Needs Node.js (any recent LTS — `nvm install --lts` if you don't have it) and
 base pipeline works without any of this; `--zk` is opt-in.
 
 ## Demo
+
+One command runs every act below in order, asserts the expected outcome of
+each (including the two that are supposed to *fail*), starts and stops its
+own Anvil if none is running, and prints a pass/fail summary:
+
+```bash
+./scripts/demo.sh --query "some search terms"
+# or: make demo QUERY="some search terms"
+
+# --probe PHOTO       use an existing image instead of the webcam
+# --camera N          webcam device index [0]
+# --headless-capture  no preview window: auto-take the first gate-passing frame
+# --no-pause          don't wait for Enter between acts (recording / CI)
+# --no-zk             skip the Groth16 acts if zk/setup.sh hasn't been run
+# --contract ADDR     reuse an already-deployed EvidenceAnchor
+```
+
+### Two discovery modes
+
+`--query` is **text-seeded**: it searches where words about the subject point,
+then verifies candidates by face. That cannot be called reverse-image search,
+because the identity is in the query.
+
+`--by-face` is **reverse-image search**: it ingests a corpus you name, embeds
+every face in it, and queries with the probe's embedding alone. No text about
+the subject is sent anywhere.
+
+```bash
+faceanchor run --probe photo.jpg --subject-consent consent/self.example.json   --by-face   --corpus mastodon:tag/selfie   --corpus mastodon:tag/portrait@mstdn.social   --corpus bsky:feed/whats-hot   --chain anvil --contract-address $CONTRACT
+
+# Stage 2: reverse-image search — 396 images ingested from 3 corpora
+# Stage 2: per-corpus — mastodon:tag/selfie 127, mastodon:tag/portrait@mstdn.social 148, bsky:feed/whats-hot 121
+# Stage 2: 392 images fetched, scoring by face
+```
+
+Corpus specs: `mastodon:tag/<tag>[@instance]`, `mastodon:account/<handle>`,
+`bsky:feed/<alias|at-uri>`, `bsky:author/<handle>`. Measured on this machine:
+~400 images ingested in 3.5s, fetched in 7s, scored by face in ~7s — 40s
+end-to-end including the anchor.
+
+Three properties make this defensible rather than a face-search engine:
+
+- **The corpus is named, not crawled.** You pass the hashtags, feeds and
+  accounts to search. There is no untargeted sweep of the open web, which is
+  the pattern EU AI Act Art. 5(1)(e) prohibits (PRD §3 cites it).
+- **Nothing persists.** The embeddings live in process memory for one run and
+  die with it — PRD §3's "no persistent embedding store" is what separates
+  this from a facial recognition database, so it is load-bearing, not an
+  optimisation.
+- **The bundle says which mode found the match.** `run.discovery` records
+  `by_face` plus the corpus specs and image count, or `text_seeded` plus the
+  *hash* of the query (the query describes a person, so it never goes on
+  chain in the clear). A verifier can tell the two claims apart.
+
+Recall is bounded by what you ingest — a few hundred to a few thousand images,
+not the web. It will not find a stranger, and that is a deliberate ceiling.
+
+### Seeing what the search actually did (`--log-candidates`)
+
+Development aid: writes every URL the run looked at, and what became of it, as
+JSONL keyed to the probe's own sha256/phash so a log can never be read against
+the wrong image.
+
+```bash
+faceanchor run ... --log-candidates evidence/candidates.jsonl
+# Stage 2: candidate log written: evidence/candidates.jsonl (243 URLs)
+```
+
+Line 1 is the header (probe hashes, corpora, per-source counts and failures);
+every line after is one candidate URL with its fetch outcome and cascade
+verdict merged:
+
+```json
+{"platform":"mastodon","image_url":"https://files.mastodon.social/.../small/48c6ba49.jpg",
+ "post_uri":"https://c.im/@fonecokid/117195145208255942","author":"fonecokid@c.im",
+ "variant":"preview","fetch":"ok","status":206,"bytes":44974,
+ "verdict":"below_threshold","cosine":0.0465}
+```
+
+A real run reads like this — which is how you tell "the search is broken" from
+"the search worked and the answer is no":
+
+```
+  131  below_threshold      cosine computed, max 0.2484 (threshold 0.363)
+  109  no_face              fetched and decoded, YuNet found nobody
+    3  not_scored           truncated at the 512KB cap, never reached the cascade
+```
+
+Verdicts: `match_phash`, `match_cosine`, `below_threshold`, `no_face`,
+`undecodable`, `not_scored`.
+
+`--contact-sheet evidence/review.html` goes further and embeds the **images**,
+not just the links: probe first, then every fetched candidate as an inlined
+thumbnail ordered by cosine, with anything above the accept threshold outlined.
+Bytes are inlined rather than linked because social CDN URLs expire (and
+Meta's are signed), so a sheet of links rots into broken images exactly when
+you go back to review a disputed match.
+
+It earns its keep immediately. A live by-face run over 404 corpus images
+produced a top match at **cosine 0.4636** — comfortably over the 0.363
+threshold, with the next candidate at 0.3067 — and the sheet shows at a glance
+that it is a **cartoon drawing of Albert Einstein** on a quote graphic. A
+score is not a verified match until a human has looked at it, and this is the
+cheapest way to look. The log is **not** part of the evidence bundle
+and is never anchored — it names third-party image URLs the pipeline merely
+looked at and did not match, which is exactly the collateral that should not
+go on an immutable ledger (PRD §6.3). It lives under `evidence/`, gitignored.
+
+**The probe comes from your webcam.** Act 2 opens a live preview with
+Stage 1's *own* quality gate running on every frame — the same
+`detect_faces` → `check_single_face` → `check_quality` path the pipeline
+uses (`scripts/capture_probe.py`):
+
+```
+  ┌───────────────────────────────┐
+  │      [ live camera feed ]     │
+  │        ┌───────────┐          │   green box = gate passing
+  │        │   face    │          │   amber box = gate failing
+  │        └───────────┘          │
+  ├───────────────────────────────┤
+  │ READY — SPACE to capture      │
+  │ face 344px (>=80)  sharpness 67 (>=60)  pose 0.17 (<=0.35) │
+  └───────────────────────────────┘
+```
+
+SPACE only fires once the gate is green, ESC aborts before anything is
+written, and `F` force-keeps a failing frame if you want to watch the
+pipeline reject it. The saved JPEG is re-gated after encoding, because the
+pipeline reads the file, not the frame buffer. It lands at
+`evidence/probe.jpg` — gitignored, never anchored, and yours to delete.
+
+Pressing the shutter is the consent moment: `--subject-consent` defaults to
+`consent/self.example.json` (Lane A, your own face). Point it at someone
+else and you need their signed artifact — see [`docs/CONSENT.md`](docs/CONSENT.md).
+
+The same thing by hand, act by act:
 
 ```bash
 # deploy (prints two addresses: Groth16Verifier, EvidenceAnchor)
@@ -345,15 +483,51 @@ program needed) exists and is unit-tested, but wasn't exercised against a
 live devnet transaction — the public devnet faucet rate-limited every
 airdrop attempt from the sandbox this was built in.
 
+## Checking the on-chain footprint
+
+`faceanchor footprint` reports what the *contract* has recorded, reading none
+of the evidence files — the chain's own account, which is the only part a
+stranger has to believe:
+
+```bash
+faceanchor footprint --chain anvil --contract-address $CONTRACT --bundle evidence/latest.json
+```
+```
+contract 0xe7f1725E…F0512 on anvil — 3 record(s) from block 0
+  [        2] Anchored 43d52a51…ea7f ts=1788262102
+              cid=bafkreiaqfu2gcovgghpcynqbemacs3tb55swv6ub22pk57ibbdofbu4xqa
+  [        3] Anchored 95706295…7bea ts=1788262102 <- this bundle
+              cid=bafkreicl4p7v7eaegsdc3glzlwuye4z7cq6gyfp5weo2yvjmucmedrybka
+  [        4] Revoked  1488aa60…9505 ts=1788262102
+
+Public footprint: none — anvil is a local devnet. It exists on this machine
+only and dies with the node; nobody can check it on the web.
+```
+
+**In development everything is local, and the tooling says so rather than
+implying otherwise.** Anvil has no block explorer entry on purpose (there is
+no `Explorer` registered for it), so the CLI reports "none" instead of
+fabricating a link. A digest anchored on Anvil is checkable by you, on this
+machine, until the node exits — and by nobody else, ever.
+
+When you *do* want a public record, `--chain amoy` needs `AMOY_RPC_URL` +
+`AMOY_PRIVATE_KEY` for a funded wallet, and prints a warning first, because an
+anchor cannot be un-anchored — only flagged revoked (§7.3). Then the same
+command emits PolygonScan links, and the useful property arrives: a third
+party opens `…/address/<contract>#readContract`, calls `verify(bytes32)` with
+the digest from the bundle, and gets the timestamp back **without running any
+of this code**. That is what makes the anchor worth anything — verification by
+a route we do not control.
+
 ## Tests
 
 ```bash
 make test   # forge test (contracts) + pytest (Python)
 ```
 
-66 tests, all green as of the last commit: 18 Solidity (EvidenceAnchor +
+85 tests, all green as of the last commit: 18 Solidity (EvidenceAnchor +
 Groth16 verifier, including a real hardcoded Groth16 proof exercised against
-the actual deployed verifier), 48 Python. ZK tests (`tests/test_zk.py`) skip
+the actual deployed verifier), 67 Python. ZK tests (`tests/test_zk.py`) skip
 cleanly if `zk/setup.sh` hasn't been run.
 
 ```bash
@@ -373,7 +547,7 @@ assumed correct:
 | Piece | Status |
 |---|---|
 | Stage 1 (YuNet detect + align + SFace embed, CPU and CUDA-batch) | Verified live; p50 17ms P-core-pinned |
-| Stage 2 discovery (Bluesky, Mastodon, Commons, DuckDuckGo Arm B) | Bluesky's public API is blocked at the CDN edge from this build sandbox (403, geo/datacenter filtering) — implemented against the documented API, unit-tested against a captured shape, **not** exercised live. Mastodon/Commons/DuckDuckGo verified live, including a genuine self-match against Wikimedia Commons with zero hardcoded matching. |
+| Stage 2 discovery (Bluesky, Mastodon, Commons, DuckDuckGo Arm B) | All four verified live, and every source reports its own count/failure per run (`Stage 2: per-source — …`). Bluesky's `searchPosts` is IP-blocked for anonymous callers after a burst (403), so the arm also resolves a handle via `getProfile`+`getAuthorFeed`, which is not blocked; Mastodon's anonymous status search is auth-gated (HTTP 200, empty), so that arm also uses account-lookup and hashtag-timeline routes. See "Known limitations". |
 | Stage 3 anchor (EvidenceAnchor.sol, JCS/CID, Anvil) | Verified live, including the tamper demo |
 | Amoy (public testnet) | Code path exists (`chain/evm.py` + `poa=True`), never deployed — needs a funded wallet key this environment doesn't have |
 | Solana devnet (SPL Memo) | Code exists, unit-tested; devnet faucet 429'd every airdrop attempt from this sandbox's IP — not exercised against a live tx |
@@ -383,17 +557,48 @@ assumed correct:
 
 ## Known limitations
 
-See PRD §11 for the full list (recall is corpus-bounded, no reverse-image
-search anywhere, SFace's accuracy ceiling, threshold is a policy choice not
-a guarantee, on-chain proof is of *observation* not *truth*, testnet
-impermanence, no liveness/anti-spoof detection). Additions found while
-building:
+See PRD §11 for the full list (recall is corpus-bounded, SFace's accuracy
+ceiling, threshold is a policy choice not a guarantee, on-chain proof is of
+*observation* not *truth*, testnet impermanence, no liveness/anti-spoof
+detection). PRD §11's "no reverse-image search anywhere" no longer holds as
+written — see `--by-face` below for what replaced it and what it still
+cannot do. Additions found while building:
 
 - **`search/commons.py` fetches a bounded-width thumbnail, not the
   original.** Commons originals commonly exceed the 512KB Range-cap fetch
   (PRD §5.2, sized for social-feed images); a raw capped fetch of a
   multi-MB original truncates mid-JPEG and produces decode artifacts that
   spuriously fail the blur quality gate. Fixed by requesting `iiurlwidth`.
+- **Two of the three Arm A sources return nothing on the obvious route, and
+  the fanout used to hide it.** A live audit (measured, not assumed):
+  Bluesky's `app.bsky.feed.searchPosts` answers 200 for a handful of anonymous
+  calls and then serves `403 Request forbidden by administrative rules` to
+  that IP — on both `public.api.bsky.app` and `api.bsky.app`, identically
+  across HTTP/1.1 and h2, with a browser UA, our UA, and no UA, while
+  `getProfile`/`getAuthorFeed` on the same host in the same second keep
+  answering 200. Mastodon's `/api/v2/search?type=statuses` is auth-gated and
+  returns a well-formed **HTTP 200 with an empty list** to anonymous callers,
+  which is indistinguishable from "no hits" unless you look. `arm_a_fanout`
+  caught every exception and returned `[]`, so a half-dead fanout looked
+  exactly like a working one — 22 candidates, no warning, no clue that two of
+  three socials contributed zero. Fixed three ways: both arms grew
+  credential-free handle routes (Bluesky `getProfile`+`getAuthorFeed`,
+  Mastodon `accounts/lookup`+`accounts/:id/statuses` and hashtag timelines,
+  each also yielding the account avatar); every source now returns a
+  `SourceReport` with its count, latency and failure reason; and `run` prints
+  the per-source breakdown plus a warning whenever any source failed.
+  Measured after the fix, one query: `bsky 7, mastodon 0, commons 20, ddg 20`
+  → 47 candidates, vs `commons 2, ddg 20` → 22 before.
+
+- **The OpenCV Zoo SFace export lists every weight in `graph.input`.** A
+  pre-IR-4 convention: ONNX Runtime therefore treats all ~300 initializers as
+  overridable, declines to const-fold them, and prints one warning per weight —
+  349 lines of stderr in front of anything the pipeline says. The batch-dynamic
+  rewrite in `vision/models.py` now strips initializers out of `graph.input`
+  (what ORT's own `remove_initializer_from_input.py` does), which silences the
+  warnings and re-enables the folding. Verified bit-comparable to both the
+  upstream graph and cv2's reference path (cosine 1.0, max abs diff 3e-07).
+
 - **The ZK circuit's vector commitment is a 2-level Poseidon tree, not a
   literal single-call sponge over 128 elements.** circomlib only ships
   precomputed round constants up to 16 Poseidon inputs; there's no
