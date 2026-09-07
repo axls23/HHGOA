@@ -9,9 +9,6 @@ independently re-verified later (Stage 3). Full design rationale, latency
 budget, and threat model live in [`PRD_face_anchor.md`](PRD_face_anchor.md) —
 this README covers what's actually built and how to run it.
 
-**No website.** The judge-facing surface is a CLI (`faceanchor run` /
-`verify` / `revoke` / `forge-score` / `footprint`, plus `corpus-build` /
-`corpus-footprint` for offline, repeatable testing) plus this repo.
 
 ## Architecture (as built)
 
