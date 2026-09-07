@@ -4,9 +4,14 @@ Full policy rationale in PRD §3. This is the practical how-to.
 
 ## Hard rules, enforced in code
 
-- `--subject-consent <path>` is required on every `faceanchor run` —
-  `src/faceanchor/consent.py::load_consent_digest` raises and the CLI
-  aborts before touching any embedding logic if it's missing.
+- `--subject-consent <path>` is required on every `faceanchor run` and every
+  `faceanchor corpus-footprint` — `src/faceanchor/consent.py::load_consent_digest`
+  raises and the CLI aborts before touching any embedding logic if it's
+  missing. (`faceanchor revoke` takes the same artifact as `--consent`: it
+  needs the digest to revoke.) `corpus-build` is the deliberate exception —
+  it ingests strangers' public posts and never touches a subject's face, so
+  a subject consent artifact would be the wrong thing to ask for; what
+  governs it is the explicit-content filter and the corpus specs you name.
 - Only the artifact's JCS-canonicalized SHA-256 digest is ever used — the
   artifact contents themselves never leave your machine, never get hashed
   into anything retrievable from the chain, and are gitignored

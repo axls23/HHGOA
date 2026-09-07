@@ -78,6 +78,32 @@ class EvmAdapter(ChainAdapter):
         revoked, ts = await self._contract.functions.consentStatus(consent_digest).call()
         return VerifyResult(ok=revoked, timestamp=ts)
 
+    async def anchored_events(self, from_block: int = 0, to_block: str | int = "latest") -> list[dict]:
+        """Every `Anchored` and `Revoked` event this contract has emitted.
+
+        This is the public footprint: what the contract has recorded, readable
+        by anyone with the address and an RPC, with no dependency on our
+        evidence files. Public RPCs commonly cap `eth_getLogs` ranges, hence
+        the explicit `from_block`.
+        """
+        events = []
+        for name in ("Anchored", "Revoked"):
+            event = getattr(self._contract.events, name)
+            for log in await event.get_logs(from_block=from_block, to_block=to_block):
+                args = dict(log["args"])
+                events.append(
+                    {
+                        "event": name,
+                        "block": log["blockNumber"],
+                        "tx_hash": log["transactionHash"].hex(),
+                        "digest": (args.get("digest") or args.get("consentDigest")).hex(),
+                        "attester": args.get("attester") or args.get("revoker"),
+                        "timestamp": args.get("timestamp"),
+                        "cid": args.get("cid", ""),
+                    }
+                )
+        return sorted(events, key=lambda e: (e["block"], e["event"]))
+
     async def anchor_with_proof(self, digest: bytes, cid: str, proof: dict, public_signals: list[str]) -> AnchorReceipt:
         # snarkjs's proof.json is (pi_a, pi_b, pi_c, affine-with-a-trailing-"1")
         # in a curve-library-internal layout, and pi_b's inner coordinate order

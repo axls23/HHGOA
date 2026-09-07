@@ -17,8 +17,13 @@ version: what this system does and doesn't protect against.
   makes the chain itself refuse an anchor whose public signals don't
   correspond to a real Groth16 proof — verified live (`forge-score`
   triggers a `BadProof()` revert).
-- **Consent state.** `revoke()` is permanent and public; a bundle whose
-  consent has been revoked is flagged loudly by `verify`.
+- **Consent state, on EVM chains.** `revoke()` is permanent and public; a
+  bundle whose consent has been revoked is flagged loudly by `verify`. This
+  is EVM-only: SPL Memo keeps no on-chain state, so a Solana anchor has no
+  revocation channel at all — `revoke --chain solana` refuses outright, and
+  `verify --chain solana` cannot report a revoked consent even if the same
+  artifact was revoked on an EVM chain. Anchoring a bundle whose consent you
+  may later need to withdraw belongs on `--chain amoy`.
 
 ## What's explicitly NOT trustless (and why)
 
@@ -53,5 +58,9 @@ version: what this system does and doesn't protect against.
 
 Anvil's well-known dev key #0 is hardcoded in `chain/anvil.py` — by design,
 never used against a real network, and Anvil funds it automatically. Amoy
-and Solana devnet keys are read from environment variables
-(`AMOY_PRIVATE_KEY`), never committed, never logged.
+reads `AMOY_PRIVATE_KEY` + `AMOY_RPC_URL`; Solana devnet reads
+`SOLANA_KEYPAIR` (a path to a solana-cli keypair JSON, read at
+`cli.py::_resolve_chain` and never copied anywhere) + optional
+`SOLANA_RPC_URL`. Neither is committed, and neither is logged: `*.key` and
+`.env` are gitignored, and nothing in `cli.py` echoes a key or a keypair
+path into evidence, a candidate log, or a bundle.

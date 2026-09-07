@@ -94,4 +94,16 @@ async def check_platform_mutation(client: httpx.AsyncClient, bundle: dict, diges
             MutationVerdict.NOT_APPLICABLE, f"platform {platform!r} has no content-addressed record to compare"
         )
 
+    # A Bluesky match found by reverse-image search is located by its public
+    # https:// permalink, not by the at:// URI the AppView APIs address. There
+    # is no record to re-fetch without resolving handle -> DID first, so this
+    # reports "not applicable" rather than parsing the https URL into garbage
+    # `repo`/`rkey` params and reading the resulting 400 as "post deleted" —
+    # a false mutation signal is worse than an absent one.
+    if not bundle["match"].get("uri", "").startswith("at://"):
+        return MutationCheckResult(
+            MutationVerdict.NOT_APPLICABLE,
+            "bsky match is located by a web permalink, not an at:// record URI — nothing content-addressed to re-fetch",
+        )
+
     return await check_bsky_record(client, bundle)

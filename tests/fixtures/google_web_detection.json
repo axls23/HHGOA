@@ -1,0 +1,47 @@
+{
+  "responses": [
+    {
+      "webDetection": {
+        "webEntities": [
+          {"entityId": "/m/0dzct", "score": 0.71, "description": "Face"},
+          {"entityId": "/m/03q69", "score": 0.55, "description": "Hair"}
+        ],
+        "fullMatchingImages": [
+          {"url": "https://cdn.bsky.app/img/feed_fullsize/plain/did:plc:abc/full.jpg", "score": 0.0}
+        ],
+        "partialMatchingImages": [
+          {"url": "https://files.mastodon.social/media_attachments/files/1/original/partial.jpg"}
+        ],
+        "visuallySimilarImages": [
+          {"url": "https://example.com/not-social/similar.jpg"},
+          {"url": "https://cdn.bsky.app/img/feed_fullsize/plain/did:plc:abc/similar.jpg"}
+        ],
+        "pagesWithMatchingImages": [
+          {
+            "url": "https://bsky.app/profile/alice.bsky.social/post/3kabcdef",
+            "pageTitle": "alice on Bluesky",
+            "fullMatchingImages": [
+              {"url": "https://cdn.bsky.app/img/feed_fullsize/plain/did:plc:abc/full.jpg"}
+            ]
+          },
+          {
+            "url": "https://mastodon.social/@bob/109123456789012345",
+            "pageTitle": "bob on Mastodon",
+            "partialMatchingImages": [
+              {"url": "https://files.mastodon.social/media_attachments/files/2/original/crop.jpg"}
+            ]
+          },
+          {
+            "url": "https://news.example.com/article/somebody-somewhere",
+            "pageTitle": "A news article",
+            "fullMatchingImages": [{"url": "https://news.example.com/img/hero.jpg"}]
+          },
+          {
+            "url": "https://mstdn.social/@carol/109999999999999999",
+            "pageTitle": "carol on Mastodon — page with no named image"
+          }
+        ]
+      }
+    }
+  ]
+}

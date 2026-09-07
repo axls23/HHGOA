@@ -35,6 +35,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Only needed for the service-account (GOOGLE_APPLICATION_CREDENTIALS) route
+# into Cloud Vision — minting an OAuth2 token means signing a JWT. The API-key
+# route (GOOGLE_VISION_API_KEY) needs nothing beyond the base install.
+vision = [
+    "google-auth>=2.35",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

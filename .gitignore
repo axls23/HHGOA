@@ -8,10 +8,11 @@ __pycache__/
 models/*.onnx
 !models/fetch.sh
 
-# evidence bundles — gitignored except one committed sample
+# evidence bundles — never committed. A real bundle names the matched post
+# and its author in the clear, so there is no committed sample: a stranger's
+# post is not ours to publish to illustrate a schema.
 evidence/*
 !evidence/.gitkeep
-!evidence/sample_bundle.json
 
 # foundry / solidity
 contracts/out/

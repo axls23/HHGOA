@@ -13,7 +13,24 @@ MODEL_CACHE = Path(os.environ.get("FACEANCHOR_MODEL_CACHE", Path.home() / ".cach
 
 YUNET_PATH = MODEL_CACHE / "face_detection_yunet_2023mar.onnx"
 SFACE_PATH = MODEL_CACHE / "face_recognition_sface_2021dec.onnx"
-SFACE_DYNBATCH_PATH = MODEL_CACHE / "face_recognition_sface_2021dec.dynbatch.onnx"
+# v2: also strips initializers out of graph.input (see ensure_sface_dynbatch_onnx).
+# The suffix is the cache-busting mechanism — a stale v1 file on disk would
+# otherwise be reused forever, since the derivation only runs when it's absent.
+SFACE_DYNBATCH_PATH = MODEL_CACHE / "face_recognition_sface_2021dec.dynbatch.v2.onnx"
+
+# Capture-stage models. Both are permissively licensed (PRD §G5): the
+# MiniFASNet pair is Apache-2.0 (minivision-ai/Silent-Face-Anti-Spoofing),
+# eDifFIQA is MIT. Neither is required by the base pipeline — code that uses
+# them degrades to the heuristic gate and says so, rather than failing.
+MINIFASNET_V2_PATH = MODEL_CACHE / "MiniFASNetV2.onnx"
+MINIFASNET_V1SE_PATH = MODEL_CACHE / "MiniFASNetV1SE.onnx"
+EDIFFIQA_PATH = MODEL_CACHE / "ediffiqa_t.onnx"
+
+# Alternative detector backend. Unlike every other weight here this one is not
+# permissively licensed — YOLOv8-derived, so GPL/AGPL — and a detector cannot be
+# scoped to an opt-in path the way the GPL Groth16Verifier is. Selected with
+# FACEANCHOR_DETECTOR; see vision/yolo_face.py.
+YOLO_FACE_PATH = MODEL_CACHE / "yolov8n-face.onnx"
 
 
 def _require(path: Path) -> Path:
@@ -39,6 +56,51 @@ def get_sface_recognizer():
     return cv2.FaceRecognizerSF.create(str(_require(SFACE_PATH)), "")
 
 
+def _cpu_session(path: Path):
+    """These two are small (1.7MB, 6.9MB) and run on one crop at a time, so a
+    CUDA context would cost more than the inference. CPU on purpose."""
+    import onnxruntime as ort
+
+    options = ort.SessionOptions()
+    options.log_severity_level = 3
+    return ort.InferenceSession(str(_require(path)), sess_options=options, providers=["CPUExecutionProvider"])
+
+
+@lru_cache(maxsize=1)
+def get_antispoof_sessions():
+    """The Silent-Face ensemble: two models over two differently-scaled crops.
+
+    Returns ((session, scale), ...). The scales are the ones the weights were
+    trained with (2.7 for V2, 4.0 for V1SE) — they are part of the model, not a
+    tunable, since each expects the face to occupy a particular fraction of its
+    80x80 input.
+    """
+    return (
+        (_cpu_session(MINIFASNET_V2_PATH), 2.7),
+        (_cpu_session(MINIFASNET_V1SE_PATH), 4.0),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_yolo_face_session():
+    """YOLOv8-face, 640x640 in, [1, 300, 21] out (box, score, class, 5 keypoints)."""
+    return _cpu_session(YOLO_FACE_PATH)
+
+
+@lru_cache(maxsize=1)
+def get_fiqa_session():
+    """eDifFIQA-T: aligned 112x112 in, one scalar quality score out."""
+    return _cpu_session(EDIFFIQA_PATH)
+
+
+def have_capture_models() -> tuple[bool, bool]:
+    """(liveness, fiqa) — which capture-stage models are actually on disk."""
+    return (
+        MINIFASNET_V2_PATH.exists() and MINIFASNET_V1SE_PATH.exists(),
+        EDIFFIQA_PATH.exists(),
+    )
+
+
 def ensure_sface_dynbatch_onnx() -> Path:
     """Derives a batch-dynamic SFace graph from the fixed-batch-1 export, cached on disk.
 
@@ -46,6 +108,13 @@ def ensure_sface_dynbatch_onnx() -> Path:
     dim 0 of the input/output to a symbolic axis is numerically identical
     (verified: <1e-6 max abs diff vs per-item inference) and is what lets the
     candidate-batch embed step actually use CUDA (PRD §5.4's one real GPU win).
+
+    The same rewrite also drops initializers from `graph.input`. That export
+    lists all ~300 weights as graph inputs (a pre-IR-4 convention), so ORT
+    treats them as overridable, declines to const-fold them, and prints one
+    warning per weight — 349 lines of stderr in front of anything the pipeline
+    actually says. Dropping them is precisely what ORT's own
+    `remove_initializer_from_input.py` does, and it re-enables the folding.
     """
     if SFACE_DYNBATCH_PATH.exists():
         return SFACE_DYNBATCH_PATH
@@ -59,6 +128,11 @@ def ensure_sface_dynbatch_onnx() -> Path:
         if vi.name == "fc1":
             vi.type.tensor_type.shape.dim[0].Clear()
             vi.type.tensor_type.shape.dim[0].dim_param = "batch"
+
+    initializers = {init.name for init in model.graph.initializer}
+    kept_inputs = [vi for vi in model.graph.input if vi.name not in initializers]
+    del model.graph.input[:]
+    model.graph.input.extend(kept_inputs)
 
     tmp_path = SFACE_DYNBATCH_PATH.with_suffix(".tmp.onnx")
     onnx.save(model, str(tmp_path))
